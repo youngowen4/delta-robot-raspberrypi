@@ -416,6 +416,16 @@ class DeltaRobotNode(Node):
         if home_point is None:
             raise RuntimeError("Unable to calculate the robot home point from HOME_THETA.")
 
+        self.get_logger().info(
+            "Workspace limits configured as "
+            f"R_MAX={self.robot.r_max:.2f}, Z_MIN={self.robot.z_min:.2f}, Z_MAX={self.robot.z_max:.2f}"
+        )
+        self.get_logger().info(
+            "Computed home point from HOME_THETA="
+            f"({HOME_THETA[0]:.3f}, {HOME_THETA[1]:.3f}, {HOME_THETA[2]:.3f}) "
+            f"as X={home_point.x:.2f}, Y={home_point.y:.2f}, Z={home_point.z:.2f}"
+        )
+
         with self.lock:
             self.robot.theta_current = home_theta
             self.robot.theta_target = home_theta

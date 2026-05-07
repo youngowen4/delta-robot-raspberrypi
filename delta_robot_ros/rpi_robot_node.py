@@ -33,7 +33,7 @@ MODE_AUTOMATIC = 1
 MODE_MANUAL = 2
 MODE_KEYBOARD = 3
 
-HOME_THETA = (0.0, 0.0, 0.0)
+HOME_POINT = (0.0, 0.0, -300.0)
 TRAJECTORY_DT = 0.02
 HOMING_STEPS = 50
 AUTO_LINE_STEPS = 50
@@ -392,6 +392,7 @@ class DeltaRobotNode(Node):
         self._homing_complete = False
         self._homing_step = 0
         self._homing_start = ThetaTarget()
+        self._home_theta = ThetaTarget()
         self._home_point = PointTarget()
 
         self.mode_subscription = self.create_subscription(Int32, MODE_TOPIC, self._on_mode, 10)
@@ -418,19 +419,22 @@ class DeltaRobotNode(Node):
         return DryRunServoBackend(self.get_logger(), SERVO_PINS)
 
     def _initialize_home_state(self) -> None:
-        home_theta = ThetaTarget(*HOME_THETA)
-        home_point = calculate_forward_kinematics(self.robot, home_theta)
-        if home_point is None:
-            raise RuntimeError("Unable to calculate the robot home point from HOME_THETA.")
+        home_point = PointTarget(*HOME_POINT, MODE_HOMING)
+        home_theta = calculate_inverse_kinematics(self.robot, home_point)
+        if home_theta is None:
+            raise RuntimeError(
+                f"Unable to calculate home joint angles from HOME_POINT={HOME_POINT}."
+            )
 
         self.get_logger().info(
             "Workspace limits configured as "
             f"R_MAX={self.robot.r_max:.2f}, Z_MIN={self.robot.z_min:.2f}, Z_MAX={self.robot.z_max:.2f}"
         )
         self.get_logger().info(
-            "Computed home point from HOME_THETA="
-            f"({HOME_THETA[0]:.3f}, {HOME_THETA[1]:.3f}, {HOME_THETA[2]:.3f}) "
-            f"as X={home_point.x:.2f}, Y={home_point.y:.2f}, Z={home_point.z:.2f}"
+            "Configured home point as "
+            f"X={home_point.x:.2f}, Y={home_point.y:.2f}, Z={home_point.z:.2f} "
+            "with computed HOME_THETA="
+            f"({home_theta.arm_1:.3f}, {home_theta.arm_2:.3f}, {home_theta.arm_3:.3f})"
         )
         if not is_in_workspace(self.robot, home_point):
             self.get_logger().warning(
@@ -439,6 +443,7 @@ class DeltaRobotNode(Node):
             )
 
         with self.lock:
+            self._home_theta = home_theta
             self.robot.theta_current = home_theta
             self.robot.theta_target = home_theta
             self.robot.end_effector_current = home_point
@@ -572,9 +577,9 @@ class DeltaRobotNode(Node):
         self._homing_step += 1
         t = clamp(self._homing_step / HOMING_STEPS, 0.0, 1.0)
         theta = ThetaTarget(
-            arm_1=self._homing_start.arm_1 + (HOME_THETA[0] - self._homing_start.arm_1) * t,
-            arm_2=self._homing_start.arm_2 + (HOME_THETA[1] - self._homing_start.arm_2) * t,
-            arm_3=self._homing_start.arm_3 + (HOME_THETA[2] - self._homing_start.arm_3) * t,
+            arm_1=self._homing_start.arm_1 + (self._home_theta.arm_1 - self._homing_start.arm_1) * t,
+            arm_2=self._homing_start.arm_2 + (self._home_theta.arm_2 - self._homing_start.arm_2) * t,
+            arm_3=self._homing_start.arm_3 + (self._home_theta.arm_3 - self._homing_start.arm_3) * t,
         )
         point = calculate_forward_kinematics(self.robot, theta)
         if point is None:

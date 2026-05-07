@@ -1,0 +1,39 @@
+Raspberry Pi 4 Model B Port Configuration
+For: RaspberryPi.py
+
+Device
+- Host device: Raspberry Pi 4 Model B
+- Operating system: Raspberry Pi OS
+- Application: RaspberryPi.py
+- Communication model: ROS 2 over a shared network
+
+Application Port Usage
+- RaspberryPi.py does not open a dedicated custom UDP or TCP control port.
+- The script communicates through ROS 2 topics using rclpy.
+- ROS 2 transport is handled by the DDS middleware installed with ROS 2.
+
+ROS 2 Topics Used By RaspberryPi.py
+- Publish: /delta/control/mode
+- Publish: /delta/control/target
+- Publish: /delta/control/command
+- Subscribe: /delta/control/status
+
+ROS 2 Network Configuration
+- All devices must be on the same IP network or otherwise routable to each other.
+- All devices should use the same ROS_DOMAIN_ID value.
+- The same DDS implementation should be used across devices when possible.
+
+Common ROS 2 / DDS Ports
+- ROS 2 does not use one single fixed application port like the old UDP version.
+- DDS typically uses UDP ports derived from the ROS domain ID.
+- A common default DDS discovery range is based around UDP ports 7400 and above.
+- Exact ports vary by DDS vendor, participant count, and ROS_DOMAIN_ID.
+
+Practical Setup Notes
+- If a firewall is enabled on the Raspberry Pi, allow ROS 2 / DDS traffic.
+- If the control device is on another machine, it must subscribe to the three control topics above.
+- If status feedback is desired, the control device must publish to /delta/control/status.
+
+Previous Non-ROS Configuration
+- The earlier UDP version used host 127.0.0.1 and port 1234.
+- That fixed port is no longer used by RaspberryPi.py after the ROS 2 rewrite.

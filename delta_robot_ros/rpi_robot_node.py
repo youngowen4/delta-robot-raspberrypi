@@ -280,16 +280,22 @@ class DryRunServoBackend(ServoBackend):
     def __init__(self, logger, pins: Tuple[int, int, int]):
         self._logger = logger
         self._pins = pins
+        self._last_signature: Optional[Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = None
 
     def apply(self, theta: ThetaTarget) -> None:
         details = []
+        pulse_signature = []
         for pin, angle_rad in zip(self._pins, theta_to_tuple(theta)):
             servo_angle = clamp(90.0 - math.degrees(angle_rad), SERVO_DEGREES_MIN, SERVO_DEGREES_MAX)
             pulse_width = SERVO_PULSE_MIN_US + (
                 (servo_angle / SERVO_DEGREES_MAX) * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US)
             )
+            pulse_signature.append(int(round(pulse_width)))
             details.append(f"GPIO {pin}: theta={angle_rad:.3f} rad servo={servo_angle:.2f} deg pulse={pulse_width:.0f}us")
-        self._logger.info("Dry-run servo update | " + " | ".join(details))
+        signature = (self._pins, tuple(pulse_signature))
+        if signature != self._last_signature:
+            self._logger.info("Dry-run servo update | " + " | ".join(details))
+            self._last_signature = signature
 
 
 class PigpioServoBackend(ServoBackend):
@@ -383,6 +389,7 @@ class DeltaRobotNode(Node):
         self._automatic_start = PointTarget()
         self._automatic_end = PointTarget()
         self._homing_active = False
+        self._homing_complete = False
         self._homing_step = 0
         self._homing_start = ThetaTarget()
         self._home_point = PointTarget()
@@ -425,6 +432,11 @@ class DeltaRobotNode(Node):
             f"({HOME_THETA[0]:.3f}, {HOME_THETA[1]:.3f}, {HOME_THETA[2]:.3f}) "
             f"as X={home_point.x:.2f}, Y={home_point.y:.2f}, Z={home_point.z:.2f}"
         )
+        if not is_in_workspace(self.robot, home_point):
+            self.get_logger().warning(
+                "Computed home point lies outside configured workspace: "
+                f"X={home_point.x:.2f}, Y={home_point.y:.2f}, Z={home_point.z:.2f}"
+            )
 
         with self.lock:
             self.robot.theta_current = home_theta
@@ -437,6 +449,7 @@ class DeltaRobotNode(Node):
                 f"{DEVICE_NAME} ready. Home point X={home_point.x:.2f} Y={home_point.y:.2f} Z={home_point.z:.2f}."
             )
             self._status_dirty = True
+            self._homing_complete = True
 
         self.servo_backend.apply(home_theta)
 
@@ -461,6 +474,8 @@ class DeltaRobotNode(Node):
                 self.latest_status = f"Unsupported mode {self.current_mode}; waiting for a valid command."
             if previous_mode == MODE_HOMING and self.current_mode != MODE_HOMING:
                 self._homing_active = False
+            if previous_mode != MODE_HOMING and self.current_mode == MODE_HOMING:
+                self._homing_complete = False
             self._status_dirty = True
 
     def _on_target(self, msg: Point) -> None:
@@ -503,11 +518,14 @@ class DeltaRobotNode(Node):
                 self._start_homing()
             elif mode == MODE_AUTOMATIC:
                 self._automatic_initialized = False
+            if mode == MODE_HOMING:
+                self._homing_complete = False
             self.latest_status = f"Command accepted from command topic: {command}"
             self._status_dirty = True
 
     def _start_homing(self) -> None:
         self._homing_active = True
+        self._homing_complete = False
         self._homing_step = 0
         self._homing_start = ThetaTarget(
             self.robot.theta_current.arm_1,
@@ -546,6 +564,8 @@ class DeltaRobotNode(Node):
         self.servo_backend.apply(next_theta)
 
     def _step_homing(self) -> Tuple[Optional[PointTarget], Optional[ThetaTarget], str]:
+        if self._homing_complete and not self._homing_active:
+            return self.robot.end_effector_current, self.robot.theta_current, "Home position held."
         if not self._homing_active:
             self._start_homing()
 
@@ -563,6 +583,7 @@ class DeltaRobotNode(Node):
 
         if self._homing_step >= HOMING_STEPS:
             self._homing_active = False
+            self._homing_complete = True
             return point, theta, "Homing completed."
 
         return point, theta, f"Homing in progress ({self._homing_step}/{HOMING_STEPS})."
@@ -684,7 +705,8 @@ def main() -> None:
     finally:
         if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -11,6 +11,11 @@ from rclpy.node import Node
 from std_msgs.msg import Int32, String
 
 try:
+    import lgpio
+except ImportError:
+    lgpio = None
+
+try:
     import pigpio
 except ImportError:
     pigpio = None
@@ -320,6 +325,50 @@ class PigpioServoBackend(ServoBackend):
         self._pi.stop()
 
 
+class LgpioServoBackend(ServoBackend):
+    def __init__(self, logger, pins: Tuple[int, int, int]):
+        if lgpio is None:
+            raise RuntimeError("lgpio Python package is not installed.")
+        if not hasattr(lgpio, "gpiochip_open"):
+            raise RuntimeError("lgpio is installed, but gpiochip support is unavailable.")
+        if not hasattr(lgpio, "tx_servo"):
+            raise RuntimeError("lgpio is installed, but tx_servo support is unavailable.")
+
+        self._logger = logger
+        self._pins = pins
+        self._handle = lgpio.gpiochip_open(0)
+
+        for pin in pins:
+            lgpio.gpio_claim_output(self._handle, pin)
+
+    def apply(self, theta: ThetaTarget) -> None:
+        for pin, angle_rad in zip(self._pins, theta_to_tuple(theta)):
+            servo_angle = clamp(90.0 - math.degrees(angle_rad), SERVO_DEGREES_MIN, SERVO_DEGREES_MAX)
+            pulse_width = int(
+                SERVO_PULSE_MIN_US
+                + ((servo_angle / SERVO_DEGREES_MAX) * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US))
+            )
+            lgpio.tx_servo(self._handle, pin, pulse_width)
+            self._logger.debug(
+                f"Applied lgpio servo output on GPIO {pin}: theta={angle_rad:.3f} rad servo={servo_angle:.2f} deg pulse={pulse_width}us"
+            )
+
+    def shutdown(self) -> None:
+        for pin in self._pins:
+            try:
+                lgpio.tx_servo(self._handle, pin, 0)
+            except Exception:
+                pass
+            try:
+                lgpio.gpio_free(self._handle, pin)
+            except Exception:
+                pass
+        try:
+            lgpio.gpiochip_close(self._handle)
+        except Exception:
+            pass
+
+
 class DeltaRobotNode(Node):
     def __init__(self) -> None:
         super().__init__(NODE_NAME)
@@ -359,9 +408,12 @@ class DeltaRobotNode(Node):
         if SERVO_BACKEND == "pigpio":
             self.get_logger().info(f"Using pigpio servo backend on GPIO pins {SERVO_PINS}.")
             return PigpioServoBackend(self.get_logger(), SERVO_PINS)
+        if SERVO_BACKEND == "lgpio":
+            self.get_logger().info(f"Using lgpio servo backend on GPIO pins {SERVO_PINS}.")
+            return LgpioServoBackend(self.get_logger(), SERVO_PINS)
 
         self.get_logger().info(
-            f"Using dry-run servo backend on GPIO pins {SERVO_PINS}. Set DELTA_SERVO_BACKEND=pigpio for hardware output."
+            f"Using dry-run servo backend on GPIO pins {SERVO_PINS}. Set DELTA_SERVO_BACKEND=lgpio or pigpio for hardware output."
         )
         return DryRunServoBackend(self.get_logger(), SERVO_PINS)
 

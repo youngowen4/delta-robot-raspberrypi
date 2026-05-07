@@ -32,9 +32,18 @@ export DELTA_SERVO_PIN_ARM3=18
 ## Servo Backend
 
 - `dry-run`: safe logging-only mode
+- `lgpio`: native GPIO backend for Ubuntu/Raspberry Pi setups with `python3-lgpio`
 - `pigpio`: real Raspberry Pi servo output
 
-Enable hardware control with:
+Enable `lgpio` hardware control with:
+
+```bash
+sudo apt update
+sudo apt install -y python3-lgpio liblgpio1
+export DELTA_SERVO_BACKEND=lgpio
+```
+
+Enable `pigpio` hardware control with:
 
 ```bash
 sudo pigpiod
@@ -69,3 +78,5 @@ Or launch the Pi node with environment-configurable pins:
 ```bash
 ros2 launch delta_robot_ros delta_robot.launch.py servo_backend:=dry-run arm1_pin:=12 arm2_pin:=13 arm3_pin:=18
 ```
+
+On Ubuntu Server for Raspberry Pi, `lgpio` is typically the better default if `pigpiod` is unavailable from apt.

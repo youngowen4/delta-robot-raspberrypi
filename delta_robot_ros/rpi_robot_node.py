@@ -1,7 +1,6 @@
 import math
 import os
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
@@ -32,7 +31,7 @@ STATUS_TOPIC = os.getenv("DELTA_STATUS_TOPIC", "/delta/control/status")
 MODE_HOMING = 0
 MODE_AUTOMATIC = 1
 MODE_MANUAL = 2
-MODE_PICK_AND_PLACE = 3
+MODE_KEYBOARD = 3
 
 HOME_THETA = (0.0, 0.0, 0.0)
 TRAJECTORY_DT = 0.02
@@ -41,7 +40,6 @@ AUTO_LINE_STEPS = 50
 AUTO_CIRCLE_STEPS = 100
 AUTO_RADIUS = 130.0
 AUTO_Z = -270.0
-PICK_AND_PLACE_TIME_MS = 1000
 LOW_PASS_FACTOR = 0.4
 LOW_PASS_MAX_STEP = 9.0
 
@@ -384,11 +382,6 @@ class DeltaRobotNode(Node):
         self._automatic_type = 0
         self._automatic_start = PointTarget()
         self._automatic_end = PointTarget()
-        self._pick_and_place_active = False
-        self._pick_and_place_start = PointTarget()
-        self._pick_and_place_end = PointTarget()
-        self._pick_and_place_step = 0
-        self._pick_and_place_steps = max(1, int(PICK_AND_PLACE_TIME_MS / (TRAJECTORY_DT * 1000.0)))
         self._homing_active = False
         self._homing_step = 0
         self._homing_start = ThetaTarget()
@@ -451,11 +444,9 @@ class DeltaRobotNode(Node):
                 self._automatic_initialized = False
                 self.latest_status = "Automatic trajectory enabled."
             elif self.current_mode == MODE_MANUAL:
-                self._pick_and_place_active = False
                 self.latest_status = "Manual target tracking enabled."
-            elif self.current_mode == MODE_PICK_AND_PLACE:
-                self._prepare_pick_and_place()
-                self.latest_status = "Pick-and-place trajectory queued."
+            elif self.current_mode == MODE_KEYBOARD:
+                self.latest_status = "Keyboard coordinate target tracking enabled."
             else:
                 self.latest_status = f"Unsupported mode {self.current_mode}; waiting for a valid command."
             if previous_mode == MODE_HOMING and self.current_mode != MODE_HOMING:
@@ -469,8 +460,6 @@ class DeltaRobotNode(Node):
             self.command_target.z = float(msg.z)
             self.command_target.mode = self.current_mode
             self.command_source = "target topic"
-            if self.current_mode == MODE_PICK_AND_PLACE:
-                self._prepare_pick_and_place()
             self.latest_status = (
                 f"Target updated from topic: X={self.command_target.x:.2f} Y={self.command_target.y:.2f} Z={self.command_target.z:.2f}."
             )
@@ -504,10 +493,6 @@ class DeltaRobotNode(Node):
                 self._start_homing()
             elif mode == MODE_AUTOMATIC:
                 self._automatic_initialized = False
-            elif mode == MODE_PICK_AND_PLACE:
-                self._prepare_pick_and_place()
-            elif mode == MODE_MANUAL:
-                self._pick_and_place_active = False
             self.latest_status = f"Command accepted from command topic: {command}"
             self._status_dirty = True
 
@@ -519,23 +504,6 @@ class DeltaRobotNode(Node):
             self.robot.theta_current.arm_2,
             self.robot.theta_current.arm_3,
         )
-        self._pick_and_place_active = False
-
-    def _prepare_pick_and_place(self) -> None:
-        self._pick_and_place_active = True
-        self._pick_and_place_step = 0
-        self._pick_and_place_start = PointTarget(
-            self.robot.end_effector_current.x,
-            self.robot.end_effector_current.y,
-            self.robot.end_effector_current.z,
-            MODE_PICK_AND_PLACE,
-        )
-        self._pick_and_place_end = PointTarget(
-            self.command_target.x,
-            self.command_target.y,
-            self.command_target.z,
-            MODE_PICK_AND_PLACE,
-        )
 
     def _control_step(self) -> None:
         with self.lock:
@@ -544,10 +512,8 @@ class DeltaRobotNode(Node):
                 next_point, next_theta, status = self._step_homing()
             elif mode == MODE_AUTOMATIC:
                 next_point, next_theta, status = self._step_automatic()
-            elif mode == MODE_MANUAL:
+            elif mode in (MODE_MANUAL, MODE_KEYBOARD):
                 next_point, next_theta, status = self._step_manual()
-            elif mode == MODE_PICK_AND_PLACE:
-                next_point, next_theta, status = self._step_pick_and_place()
             else:
                 next_point = None
                 next_theta = None
@@ -626,6 +592,13 @@ class DeltaRobotNode(Node):
 
         theta = self._point_to_theta(point)
         if theta is None:
+            self.get_logger().warning(
+                "Automatic trajectory rejected at "
+                f"X={point.x:.2f} Y={point.y:.2f} Z={point.z:.2f} "
+                f"from current X={self.robot.end_effector_current.x:.2f} "
+                f"Y={self.robot.end_effector_current.y:.2f} "
+                f"Z={self.robot.end_effector_current.z:.2f}"
+            )
             return None, None, "Error: automatic trajectory point is outside reachable workspace."
         return point, theta, f"Automatic motion active at X={point.x:.2f} Y={point.y:.2f} Z={point.z:.2f}."
 
@@ -634,44 +607,38 @@ class DeltaRobotNode(Node):
             self.command_target.x,
             self.command_target.y,
             self.command_target.z,
-            MODE_MANUAL,
+            self.current_mode,
         )
         point = low_pass_filter(self.robot.end_effector_current, target)
         theta = self._point_to_theta(point)
         if theta is None:
-            return None, None, "Error: manual target is outside reachable workspace."
+            mode_name = "keyboard" if self.current_mode == MODE_KEYBOARD else "manual"
+            self.get_logger().warning(
+                f"{mode_name.capitalize()} target rejected after filtering at "
+                f"X={point.x:.2f} Y={point.y:.2f} Z={point.z:.2f}; "
+                f"requested X={target.x:.2f} Y={target.y:.2f} Z={target.z:.2f}; "
+                f"current X={self.robot.end_effector_current.x:.2f} "
+                f"Y={self.robot.end_effector_current.y:.2f} "
+                f"Z={self.robot.end_effector_current.z:.2f}"
+            )
+            return None, None, f"Error: {mode_name} target is outside reachable workspace."
+
+        if self.current_mode == MODE_KEYBOARD:
+            return point, theta, f"Keyboard target tracking from {self.command_source}."
         return point, theta, f"Manual control tracking target from {self.command_source}."
-
-    def _step_pick_and_place(self) -> Tuple[Optional[PointTarget], Optional[ThetaTarget], str]:
-        if not self._pick_and_place_active:
-            self._prepare_pick_and_place()
-
-        if (
-            self.robot.end_effector_current.x == self._pick_and_place_end.x
-            and self.robot.end_effector_current.y == self._pick_and_place_end.y
-            and self.robot.end_effector_current.z == self._pick_and_place_end.z
-        ):
-            return self.robot.end_effector_current, self.robot.theta_current, "Pick-and-place target reached."
-
-        t = clamp(self._pick_and_place_step / self._pick_and_place_steps, 0.0, 1.0)
-        clearance_height = self.robot.z_max - self.robot.z_min - 1.0
-        point = parabolic_arc_point(self._pick_and_place_start, self._pick_and_place_end, clearance_height, t)
-        theta = self._point_to_theta(point)
-        if theta is None:
-            self._pick_and_place_active = False
-            return None, None, "Error: pick-and-place arc left the reachable workspace."
-
-        self._pick_and_place_step += 1
-        if self._pick_and_place_step > self._pick_and_place_steps:
-            self._pick_and_place_active = False
-            point = self._pick_and_place_end
-
-        return point, theta, f"Pick-and-place trajectory active ({self._pick_and_place_step}/{self._pick_and_place_steps})."
 
     def _point_to_theta(self, point: PointTarget) -> Optional[ThetaTarget]:
         if not is_in_workspace(self.robot, point):
+            self.get_logger().warning(
+                f"Workspace bounds rejection at X={point.x:.2f} Y={point.y:.2f} Z={point.z:.2f}"
+            )
             return None
-        return calculate_inverse_kinematics(self.robot, point)
+        theta = calculate_inverse_kinematics(self.robot, point)
+        if theta is None:
+            self.get_logger().warning(
+                f"Inverse kinematics rejection at X={point.x:.2f} Y={point.y:.2f} Z={point.z:.2f}"
+            )
+        return theta
 
     def _publish_status(self) -> None:
         with self.lock:

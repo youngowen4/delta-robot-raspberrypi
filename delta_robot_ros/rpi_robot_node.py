@@ -42,6 +42,7 @@ AUTO_RADIUS = 130.0
 AUTO_Z = -270.0
 LOW_PASS_FACTOR = 0.4
 LOW_PASS_MAX_STEP = 9.0
+WORKSPACE_EPSILON = 1e-3
 
 SERVO_PULSE_MIN_US = 500.0
 SERVO_PULSE_MAX_US = 2000.0
@@ -150,9 +151,9 @@ def passive_rotation(point: PointTarget, phi_degrees: int) -> PointTarget:
 
 
 def is_in_workspace(robot: RobotState, point: PointTarget) -> bool:
-    if point.z > robot.z_max or point.z < robot.z_min:
+    if point.z > robot.z_max + WORKSPACE_EPSILON or point.z < robot.z_min - WORKSPACE_EPSILON:
         return False
-    return point.x * point.x + point.y * point.y <= robot.r_max * robot.r_max
+    return point.x * point.x + point.y * point.y <= (robot.r_max * robot.r_max) + WORKSPACE_EPSILON
 
 
 def calculate_inverse_kinematics(robot: RobotState, point: PointTarget) -> Optional[ThetaTarget]:
@@ -388,6 +389,7 @@ class DeltaRobotNode(Node):
         self._automatic_type = 0
         self._automatic_start = PointTarget()
         self._automatic_end = PointTarget()
+        self._last_rejection_message = ""
         self._homing_active = False
         self._homing_complete = False
         self._homing_step = 0
@@ -665,16 +667,21 @@ class DeltaRobotNode(Node):
 
     def _point_to_theta(self, point: PointTarget) -> Optional[ThetaTarget]:
         if not is_in_workspace(self.robot, point):
-            self.get_logger().warning(
+            self._warn_once(
                 f"Workspace bounds rejection at X={point.x:.2f} Y={point.y:.2f} Z={point.z:.2f}"
             )
             return None
         theta = calculate_inverse_kinematics(self.robot, point)
         if theta is None:
-            self.get_logger().warning(
+            self._warn_once(
                 f"Inverse kinematics rejection at X={point.x:.2f} Y={point.y:.2f} Z={point.z:.2f}"
             )
         return theta
+
+    def _warn_once(self, message: str) -> None:
+        if message != self._last_rejection_message:
+            self.get_logger().warning(message)
+            self._last_rejection_message = message
 
     def _publish_status(self) -> None:
         with self.lock:

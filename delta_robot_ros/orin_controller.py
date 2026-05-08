@@ -17,6 +17,7 @@ STATUS_TOPIC = os.getenv("DELTA_STATUS_TOPIC", "/delta/control/status")
 
 
 R_MAX = 135.0
+R_TARGET_MARGIN = 0.5
 Z_MIN = -335.0
 Z_MAX = -268.0
 DEFAULT_Z = -300.0
@@ -78,7 +79,7 @@ def clamp(value, low, high):
 
 
 def within_workspace(x_value, y_value, z_value):
-    return math.hypot(x_value, y_value) <= R_MAX and Z_MIN <= z_value <= Z_MAX
+    return math.hypot(x_value, y_value) <= (R_MAX - R_TARGET_MARGIN) and Z_MIN <= z_value <= Z_MAX
 
 
 def map_mouse_to_robot(mouse_x, mouse_y):
@@ -88,8 +89,9 @@ def map_mouse_to_robot(mouse_x, mouse_y):
     robot_target_y = -(dy / DRAW_RADIUS) * R_MAX
 
     distance = math.hypot(robot_target_x, robot_target_y)
-    if distance > R_MAX:
-        scale = R_MAX / distance
+    max_radius = R_MAX - R_TARGET_MARGIN
+    if distance > max_radius:
+        scale = max_radius / distance
         robot_target_x *= scale
         robot_target_y *= scale
 

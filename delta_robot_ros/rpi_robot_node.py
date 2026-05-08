@@ -43,6 +43,7 @@ AUTO_Z = -270.0
 LOW_PASS_FACTOR = 0.4
 LOW_PASS_MAX_STEP = 9.0
 WORKSPACE_EPSILON = 1e-3
+WORKSPACE_RADIAL_MARGIN = 0.5
 
 SERVO_PULSE_MIN_US = 500.0
 SERVO_PULSE_MAX_US = 2000.0
@@ -153,7 +154,8 @@ def passive_rotation(point: PointTarget, phi_degrees: int) -> PointTarget:
 def is_in_workspace(robot: RobotState, point: PointTarget) -> bool:
     if point.z > robot.z_max + WORKSPACE_EPSILON or point.z < robot.z_min - WORKSPACE_EPSILON:
         return False
-    return point.x * point.x + point.y * point.y <= (robot.r_max * robot.r_max) + WORKSPACE_EPSILON
+    radial_limit = robot.r_max + WORKSPACE_RADIAL_MARGIN
+    return point.x * point.x + point.y * point.y <= radial_limit * radial_limit
 
 
 def calculate_inverse_kinematics(robot: RobotState, point: PointTarget) -> Optional[ThetaTarget]:
@@ -390,6 +392,7 @@ class DeltaRobotNode(Node):
         self._automatic_start = PointTarget()
         self._automatic_end = PointTarget()
         self._last_rejection_message = ""
+        self._last_manual_rejection_message = ""
         self._homing_active = False
         self._homing_complete = False
         self._homing_step = 0
@@ -466,6 +469,7 @@ class DeltaRobotNode(Node):
             self.current_mode = int(msg.data)
             self.command_target.mode = self.current_mode
             self.command_source = "mode topic"
+            self._last_manual_rejection_message = ""
 
             if self.current_mode == MODE_HOMING:
                 self._start_homing()
@@ -492,6 +496,7 @@ class DeltaRobotNode(Node):
             self.command_target.z = float(msg.z)
             self.command_target.mode = self.current_mode
             self.command_source = "target topic"
+            self._last_manual_rejection_message = ""
             self.latest_status = (
                 f"Target updated from topic: X={self.command_target.x:.2f} Y={self.command_target.y:.2f} Z={self.command_target.z:.2f}."
             )
@@ -512,6 +517,7 @@ class DeltaRobotNode(Node):
         with self.lock:
             self.current_mode = mode
             self.command_target.mode = mode
+            self._last_manual_rejection_message = ""
             if len(parts) >= 4:
                 try:
                     self.command_target.x = float(parts[1])
@@ -651,7 +657,7 @@ class DeltaRobotNode(Node):
         theta = self._point_to_theta(point)
         if theta is None:
             mode_name = "keyboard" if self.current_mode == MODE_KEYBOARD else "manual"
-            self.get_logger().warning(
+            rejection_message = (
                 f"{mode_name.capitalize()} target rejected after filtering at "
                 f"X={point.x:.2f} Y={point.y:.2f} Z={point.z:.2f}; "
                 f"requested X={target.x:.2f} Y={target.y:.2f} Z={target.z:.2f}; "
@@ -659,8 +665,12 @@ class DeltaRobotNode(Node):
                 f"Y={self.robot.end_effector_current.y:.2f} "
                 f"Z={self.robot.end_effector_current.z:.2f}"
             )
+            if rejection_message != self._last_manual_rejection_message:
+                self.get_logger().warning(rejection_message)
+                self._last_manual_rejection_message = rejection_message
             return None, None, f"Error: {mode_name} target is outside reachable workspace."
 
+        self._last_manual_rejection_message = ""
         if self.current_mode == MODE_KEYBOARD:
             return point, theta, f"Keyboard target tracking from {self.command_source}."
         return point, theta, f"Manual control tracking target from {self.command_source}."

@@ -12,7 +12,7 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            DeclareLaunchArgument("servo_backend", default_value="dry-run"),
+            DeclareLaunchArgument("servo_backend", default_value="auto"),
             DeclareLaunchArgument("arm1_pin", default_value="12"),
             DeclareLaunchArgument("arm2_pin", default_value="13"),
             DeclareLaunchArgument("arm3_pin", default_value="18"),

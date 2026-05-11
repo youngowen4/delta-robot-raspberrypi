@@ -42,11 +42,13 @@ AUTO_RADIUS = 130.0
 AUTO_Z = -270.0
 LOW_PASS_FACTOR = 0.4
 LOW_PASS_MAX_STEP = 9.0
+POSITION_DEADBAND_MM = float(os.getenv("DELTA_POSITION_DEADBAND_MM", "0.75"))
+THETA_DEADBAND_DEG = float(os.getenv("DELTA_THETA_DEADBAND_DEG", "0.8"))
 WORKSPACE_EPSILON = 1e-3
 WORKSPACE_RADIAL_MARGIN = 0.5
 
-SERVO_PULSE_MIN_US = 500.0
-SERVO_PULSE_MAX_US = 2000.0
+SERVO_PULSE_MIN_US = float(os.getenv("DELTA_SERVO_PULSE_MIN_US", "1000.0"))
+SERVO_PULSE_MAX_US = float(os.getenv("DELTA_SERVO_PULSE_MAX_US", "2000.0"))
 SERVO_DEGREES_MIN = 0.0
 SERVO_DEGREES_MAX = 180.0
 
@@ -59,7 +61,7 @@ SERVO_PINS = tuple(
     )
 )
 
-SERVO_BACKEND = os.getenv("DELTA_SERVO_BACKEND", "dry-run").strip().lower()
+SERVO_BACKEND = os.getenv("DELTA_SERVO_BACKEND", "auto").strip().lower()
 STATUS_PERIOD_SEC = float(os.getenv("DELTA_STATUS_PERIOD_SEC", "0.5"))
 
 
@@ -127,6 +129,21 @@ def low_pass_filter(current: PointTarget, target: PointTarget) -> PointTarget:
         z=current.z + step_z,
         mode=target.mode,
     )
+
+
+def point_distance(current: PointTarget, target: PointTarget) -> float:
+    dx = target.x - current.x
+    dy = target.y - current.y
+    dz = target.z - current.z
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+def theta_distance_degrees(current: ThetaTarget, target: ThetaTarget) -> float:
+    deltas = [
+        abs(math.degrees(target_value - current_value))
+        for current_value, target_value in zip(theta_to_tuple(current), theta_to_tuple(target))
+    ]
+    return max(deltas)
 
 
 def parabolic_arc_point(start: PointTarget, end: PointTarget, height: float, t: float) -> PointTarget:
@@ -279,6 +296,17 @@ class ServoBackend:
         return None
 
 
+def theta_to_pulse_signature(theta: ThetaTarget) -> Tuple[int, int, int]:
+    pulses = []
+    for angle_rad in theta_to_tuple(theta):
+        servo_angle = clamp(90.0 - math.degrees(angle_rad), SERVO_DEGREES_MIN, SERVO_DEGREES_MAX)
+        pulse_width = SERVO_PULSE_MIN_US + (
+            (servo_angle / SERVO_DEGREES_MAX) * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US)
+        )
+        pulses.append(int(round(pulse_width)))
+    return tuple(pulses)
+
+
 class DryRunServoBackend(ServoBackend):
     def __init__(self, logger, pins: Tuple[int, int, int]):
         self._logger = logger
@@ -287,15 +315,11 @@ class DryRunServoBackend(ServoBackend):
 
     def apply(self, theta: ThetaTarget) -> None:
         details = []
-        pulse_signature = []
-        for pin, angle_rad in zip(self._pins, theta_to_tuple(theta)):
+        pulse_signature = theta_to_pulse_signature(theta)
+        for pin, angle_rad, pulse_width in zip(self._pins, theta_to_tuple(theta), pulse_signature):
             servo_angle = clamp(90.0 - math.degrees(angle_rad), SERVO_DEGREES_MIN, SERVO_DEGREES_MAX)
-            pulse_width = SERVO_PULSE_MIN_US + (
-                (servo_angle / SERVO_DEGREES_MAX) * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US)
-            )
-            pulse_signature.append(int(round(pulse_width)))
             details.append(f"GPIO {pin}: theta={angle_rad:.3f} rad servo={servo_angle:.2f} deg pulse={pulse_width:.0f}us")
-        signature = (self._pins, tuple(pulse_signature))
+        signature = (self._pins, pulse_signature)
         if signature != self._last_signature:
             self._logger.info("Dry-run servo update | " + " | ".join(details))
             self._last_signature = signature
@@ -308,6 +332,7 @@ class PigpioServoBackend(ServoBackend):
 
         self._logger = logger
         self._pins = pins
+        self._last_pulses: Optional[Tuple[int, int, int]] = None
         self._pi = pigpio.pi()
         if not self._pi.connected:
             raise RuntimeError("Unable to connect to pigpio daemon. Start it with 'sudo pigpiod'.")
@@ -316,15 +341,17 @@ class PigpioServoBackend(ServoBackend):
             self._pi.set_mode(pin, pigpio.OUTPUT)
 
     def apply(self, theta: ThetaTarget) -> None:
-        for pin, angle_rad in zip(self._pins, theta_to_tuple(theta)):
+        pulse_signature = theta_to_pulse_signature(theta)
+        if pulse_signature == self._last_pulses:
+            return
+
+        for pin, angle_rad, pulse_width in zip(self._pins, theta_to_tuple(theta), pulse_signature):
             servo_angle = clamp(90.0 - math.degrees(angle_rad), SERVO_DEGREES_MIN, SERVO_DEGREES_MAX)
-            pulse_width = SERVO_PULSE_MIN_US + (
-                (servo_angle / SERVO_DEGREES_MAX) * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US)
-            )
             self._pi.set_servo_pulsewidth(pin, pulse_width)
             self._logger.debug(
                 f"Applied servo output on GPIO {pin}: theta={angle_rad:.3f} rad servo={servo_angle:.2f} deg pulse={pulse_width:.0f}us"
             )
+        self._last_pulses = pulse_signature
 
     def shutdown(self) -> None:
         for pin in self._pins:
@@ -343,22 +370,24 @@ class LgpioServoBackend(ServoBackend):
 
         self._logger = logger
         self._pins = pins
+        self._last_pulses: Optional[Tuple[int, int, int]] = None
         self._handle = lgpio.gpiochip_open(0)
 
         for pin in pins:
             lgpio.gpio_claim_output(self._handle, pin)
 
     def apply(self, theta: ThetaTarget) -> None:
-        for pin, angle_rad in zip(self._pins, theta_to_tuple(theta)):
+        pulse_signature = theta_to_pulse_signature(theta)
+        if pulse_signature == self._last_pulses:
+            return
+
+        for pin, angle_rad, pulse_width in zip(self._pins, theta_to_tuple(theta), pulse_signature):
             servo_angle = clamp(90.0 - math.degrees(angle_rad), SERVO_DEGREES_MIN, SERVO_DEGREES_MAX)
-            pulse_width = int(
-                SERVO_PULSE_MIN_US
-                + ((servo_angle / SERVO_DEGREES_MAX) * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US))
-            )
             lgpio.tx_servo(self._handle, pin, pulse_width)
             self._logger.debug(
                 f"Applied lgpio servo output on GPIO {pin}: theta={angle_rad:.3f} rad servo={servo_angle:.2f} deg pulse={pulse_width}us"
             )
+        self._last_pulses = pulse_signature
 
     def shutdown(self) -> None:
         for pin in self._pins:
@@ -411,15 +440,34 @@ class DeltaRobotNode(Node):
         self._initialize_home_state()
 
     def _create_servo_backend(self) -> ServoBackend:
-        if SERVO_BACKEND == "pigpio":
+        backend = SERVO_BACKEND
+        if backend == "auto":
+            if lgpio is not None and hasattr(lgpio, "gpiochip_open") and hasattr(lgpio, "tx_servo"):
+                backend = "lgpio"
+            elif pigpio is not None:
+                backend = "pigpio"
+            else:
+                backend = "dry-run"
+            self.get_logger().info(f"Auto-selected servo backend: {backend}.")
+
+        self.get_logger().info(
+            "Servo pulse range configured as "
+            f"{SERVO_PULSE_MIN_US:.0f}us to {SERVO_PULSE_MAX_US:.0f}us."
+        )
+        self.get_logger().info(
+            "Motion deadband configured as "
+            f"{POSITION_DEADBAND_MM:.2f} mm and {THETA_DEADBAND_DEG:.2f} deg."
+        )
+
+        if backend == "pigpio":
             self.get_logger().info(f"Using pigpio servo backend on GPIO pins {SERVO_PINS}.")
             return PigpioServoBackend(self.get_logger(), SERVO_PINS)
-        if SERVO_BACKEND == "lgpio":
+        if backend == "lgpio":
             self.get_logger().info(f"Using lgpio servo backend on GPIO pins {SERVO_PINS}.")
             return LgpioServoBackend(self.get_logger(), SERVO_PINS)
 
         self.get_logger().info(
-            f"Using dry-run servo backend on GPIO pins {SERVO_PINS}. Set DELTA_SERVO_BACKEND=lgpio or pigpio for hardware output."
+            f"Using dry-run servo backend on GPIO pins {SERVO_PINS}. Set DELTA_SERVO_BACKEND=lgpio, pigpio, or auto for hardware output."
         )
         return DryRunServoBackend(self.get_logger(), SERVO_PINS)
 
@@ -653,6 +701,11 @@ class DeltaRobotNode(Node):
             self.command_target.z,
             self.current_mode,
         )
+        if point_distance(self.robot.end_effector_current, target) <= POSITION_DEADBAND_MM:
+            if self.current_mode == MODE_KEYBOARD:
+                return self.robot.end_effector_current, self.robot.theta_current, "Keyboard target within deadband; holding position."
+            return self.robot.end_effector_current, self.robot.theta_current, "Manual target within deadband; holding position."
+
         point = low_pass_filter(self.robot.end_effector_current, target)
         theta = self._point_to_theta(point)
         if theta is None:
@@ -671,6 +724,11 @@ class DeltaRobotNode(Node):
             return None, None, f"Error: {mode_name} target is outside reachable workspace."
 
         self._last_manual_rejection_message = ""
+        if theta_distance_degrees(self.robot.theta_current, theta) <= THETA_DEADBAND_DEG:
+            if self.current_mode == MODE_KEYBOARD:
+                return self.robot.end_effector_current, self.robot.theta_current, "Keyboard motion within joint deadband; holding position."
+            return self.robot.end_effector_current, self.robot.theta_current, "Manual motion within joint deadband; holding position."
+
         if self.current_mode == MODE_KEYBOARD:
             return point, theta, f"Keyboard target tracking from {self.command_source}."
         return point, theta, f"Manual control tracking target from {self.command_source}."

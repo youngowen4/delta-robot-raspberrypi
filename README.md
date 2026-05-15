@@ -61,8 +61,8 @@ export DELTA_SERVO_PULSE_MAX_US=2000
 Motion deadband can be tuned to suppress small target corrections and joint chatter:
 
 ```bash
-export DELTA_POSITION_DEADBAND_MM=0.75
-export DELTA_THETA_DEADBAND_DEG=0.8
+export DELTA_POSITION_DEADBAND_MM=0.0
+export DELTA_THETA_DEADBAND_DEG=0.0
 ```
 
 ## Build

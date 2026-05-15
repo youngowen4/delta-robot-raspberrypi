@@ -1,5 +1,6 @@
 import math
 import os
+import re
 
 import pygame
 import rclpy
@@ -51,27 +52,39 @@ class DeltaControlBridge(Node):
             10,
         )
         self.latest_status = "Waiting for ROS 2 controller feedback..."
+        self._last_published_mode = None
+        self._last_published_target = None
+        self._last_published_command = None
 
     def _on_status(self, msg):
         self.latest_status = msg.data or "Controller status topic is empty."
 
     def publish_state(self, mode, x_value, y_value, z_value):
-        mode_msg = Int32()
-        mode_msg.data = mode
-        self.mode_publisher.publish(mode_msg)
+        if mode != self._last_published_mode:
+            mode_msg = Int32()
+            mode_msg.data = mode
+            self.mode_publisher.publish(mode_msg)
+            self._last_published_mode = mode
 
-        target_msg = Point()
-        target_msg.x = float(x_value)
-        target_msg.y = float(y_value)
-        target_msg.z = float(z_value)
-        self.target_publisher.publish(target_msg)
+        target_signature = (float(x_value), float(y_value), float(z_value))
+        if target_signature != self._last_published_target:
+            target_msg = Point()
+            target_msg.x = target_signature[0]
+            target_msg.y = target_signature[1]
+            target_msg.z = target_signature[2]
+            self.target_publisher.publish(target_msg)
+            self._last_published_target = target_signature
 
-        command_msg = String()
         if mode in (0, 1):
-            command_msg.data = f"{mode}"
+            command_data = f"{mode}"
         else:
-            command_msg.data = f"{mode},{x_value:.7f},{y_value:.7f},{z_value:.7f}"
-        self.command_publisher.publish(command_msg)
+            command_data = f"{mode},{x_value:.7f},{y_value:.7f},{z_value:.7f}"
+
+        if command_data != self._last_published_command:
+            command_msg = String()
+            command_msg.data = command_data
+            self.command_publisher.publish(command_msg)
+            self._last_published_command = command_data
 
 
 def clamp(value, low, high):
@@ -80,6 +93,17 @@ def clamp(value, low, high):
 
 def within_workspace(x_value, y_value, z_value):
     return math.hypot(x_value, y_value) <= (R_MAX - R_TARGET_MARGIN) and Z_MIN <= z_value <= Z_MAX
+
+
+def parse_coordinate_input(input_text):
+    parts = [part for part in re.split(r"[\s,]+", input_text.strip()) if part]
+    if len(parts) < 2:
+        raise ValueError("Enter at least X and Y.")
+    return (
+        float(parts[0]),
+        float(parts[1]),
+        float(parts[2]) if len(parts) >= 3 else None,
+    )
 
 
 def map_mouse_to_robot(mouse_x, mouse_y):
@@ -177,7 +201,7 @@ def draw_ui(
             screen.blit(txt_guide, (20, HEIGHT - 50))
         else:
             txt_guide = font.render(
-                "Press ENTER for X Y Z input. Use the mouse wheel to change Z.",
+                "Press ENTER for X Y Z input. Use spaces or commas. Use the mouse wheel to change Z.",
                 True,
                 INFO_COLOR,
             )
@@ -230,22 +254,17 @@ def main():
                 if mode == 3 and is_typing:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         try:
-                            parts = input_text.strip().split()
-                            if len(parts) < 2:
-                                local_status = "Error: Enter at least X and Y."
+                            new_x, new_y, parsed_z = parse_coordinate_input(input_text)
+                            new_z = parsed_z if parsed_z is not None else robot_z
+                            if within_workspace(new_x, new_y, new_z):
+                                robot_x, robot_y, robot_z = new_x, new_y, new_z
+                                input_text = ""
+                                is_typing = False
+                                local_status = "Coordinates accepted and published."
                             else:
-                                new_x = float(parts[0])
-                                new_y = float(parts[1])
-                                new_z = float(parts[2]) if len(parts) >= 3 else robot_z
-                                if within_workspace(new_x, new_y, new_z):
-                                    robot_x, robot_y, robot_z = new_x, new_y, new_z
-                                    input_text = ""
-                                    is_typing = False
-                                    local_status = "Coordinates accepted and published."
-                                else:
-                                    local_status = f"Error: Out of range (R<={R_MAX}, {Z_MIN}<=Z<={Z_MAX})."
+                                local_status = f"Error: Out of range (R<={R_MAX}, {Z_MIN}<=Z<={Z_MAX})."
                         except ValueError:
-                            local_status = "Error: Only numeric values are allowed."
+                            local_status = "Error: Enter numeric X Y Z values."
                     elif event.key == pygame.K_BACKSPACE:
                         input_text = input_text[:-1]
                         local_status = "Editing input."
@@ -253,7 +272,7 @@ def main():
                         is_typing = False
                         input_text = ""
                         local_status = "Input cancelled."
-                    elif event.unicode in "0123456789- .":
+                    elif event.unicode in "0123456789- .,":
                         input_text += event.unicode
                         local_status = "Editing input."
                 else:

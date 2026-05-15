@@ -59,6 +59,20 @@ class DeltaControlBridge(Node):
     def _on_status(self, msg):
         self.latest_status = msg.data or "Controller status topic is empty."
 
+    def publish_command(self, mode, x_value=None, y_value=None, z_value=None, force=False):
+        if mode in (0, 1):
+            command_data = f"{mode}"
+        else:
+            command_data = f"{mode},{x_value:.7f},{y_value:.7f},{z_value:.7f}"
+
+        if force or command_data != self._last_published_command:
+            command_msg = String()
+            command_msg.data = command_data
+            self.command_publisher.publish(command_msg)
+            self._last_published_command = command_data
+
+        return command_data
+
     def publish_state(self, mode, x_value, y_value, z_value):
         if mode != self._last_published_mode:
             mode_msg = Int32()
@@ -76,15 +90,9 @@ class DeltaControlBridge(Node):
             self._last_published_target = target_signature
 
         if mode in (0, 1):
-            command_data = f"{mode}"
+            self.publish_command(mode)
         else:
-            command_data = f"{mode},{x_value:.7f},{y_value:.7f},{z_value:.7f}"
-
-        if command_data != self._last_published_command:
-            command_msg = String()
-            command_msg.data = command_data
-            self.command_publisher.publish(command_msg)
-            self._last_published_command = command_data
+            self.publish_command(mode, x_value, y_value, z_value)
 
 
 def clamp(value, low, high):
@@ -258,9 +266,16 @@ def main():
                             new_z = parsed_z if parsed_z is not None else robot_z
                             if within_workspace(new_x, new_y, new_z):
                                 robot_x, robot_y, robot_z = new_x, new_y, new_z
+                                command_data = ros_bridge.publish_command(
+                                    mode,
+                                    robot_x,
+                                    robot_y,
+                                    robot_z,
+                                    force=True,
+                                )
                                 input_text = ""
                                 is_typing = False
-                                local_status = "Coordinates accepted and published."
+                                local_status = f"Published command: {command_data}"
                             else:
                                 local_status = f"Error: Out of range (R<={R_MAX}, {Z_MIN}<=Z<={Z_MAX})."
                         except ValueError:
